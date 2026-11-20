@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Myanmar TTS logo: speaker on dark background.
+     Path: app/src/main/res/drawable/ic_launcher.xml -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#0D1226"
+        android:pathData="M0,0h24v24H0z" />
+    <path
+        android:fillColor="#00E5FF"
+        android:pathData="M3,9v6h4l5,5V4L7,9H3z" />
+    <path
+        android:pathData="M16.5,8.5a5,5 0 0,1 0,7"
+        android:strokeWidth="1.8"
+        android:strokeColor="#FF2D95" />
+    <path
+        android:pathData="M19,6a8.5,8.5 0 0,1 0,12"
+        android:strokeWidth="1.8"
+        android:strokeColor="#FF2D95" />
+</vector>
