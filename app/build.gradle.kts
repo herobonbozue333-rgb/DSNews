@@ -42,5 +42,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // Video ပေါင်းတာ (NewsRenderer.kt) — DS Recap Tool ရဲ့ VideoMerger.kt နဲ့ အတူတူ
-    implementation("com.arthenica:ffmpeg-kit-full:6.0")
+    // 2026-11-20 ပြင်: com.arthenica:ffmpeg-kit-full:6.0 ကို Maven Central ကနေ
+    // 2025 April မှာ ဖျက်လိုက်ပြီ (arthenica archived) — clean build မှာ ရှာမတွေ့တော့ဘူး။
+    // အစားထိုး: dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7 — package/class အတူတူ
+    // (com.arthenica.ffmpegkit.FFmpegKit), code ဘာမှ ပြင်စရာ မလို။
+    implementation("dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.7")
 }
