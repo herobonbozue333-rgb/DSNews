@@ -1,5 +1,7 @@
 package com.example.dsnews
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -48,13 +50,18 @@ import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 /**
- * DS News Tool V1 — Zippy News လို workflow + Hybrid ပုံစံ။
- * App ထဲမှာ Gemini တိုက်ရိုက်သုံးတယ် (Gemini app ပြောင်း၊ JSON ကူးစရာ မလို)။
- * အသံ Edge TTS (Thiha/Nilar)၊ 9:16 video၊ Template ၃ ခု၊ Ticker + Watermark။
- * YouTube ကို App က ရှာပေးတယ်၊ footage file ကို ဖုန်းထဲက ရွေးထည့်တယ် —
- * App ကိုယ်တိုင် YouTube ကနေ download မလုပ်ဘူး (လုံခြုံတဲ့နည်း)။
+ * DS News Tool V2 — Zippy News လို workflow အတိုင်း (အပြင် Gemini + JSON paste)။
  *
- * အဆင့်: သတင်းထည့် → Script ထုတ် (Gemini) → Script ပြင် → Video လုပ် (TTS + FFmpeg) → Save/Share
+ * Key ထည့်စရာ လုံးဝ မလိုတော့ဘူး — Gemini က အပြင် Gemini app က Google account နဲ့ လုပ်တယ်၊
+ * YouTube search လည်း ဒီ workflow မှာ မပါဘူး (ဖြုတ်ထားတယ်)။
+ *
+ * အဆင့်: သတင်းထည့် → Gemini အပြင်ထုတ်မယ် (prompt + video Share) →
+ * Gemini က JSON plan ပြန်ပေးတယ် → Plan JSON ကူးထည့် → Plan ဖတ်မယ် →
+ * Script ပြင် → Video လုပ် (TTS + FFmpeg) → Save/Share
+ *
+ * JSON plan က ကိုယ်ပိုင် schema — title / ticker / template / voice / music_mood /
+ * shots [{text, move, image, credit}] / sources။ Zippy ရဲ့ prompt စာသား၊
+ * template ဒီဇိုင်း၊ code တွေ အတိအကျ ကူးထားတာ မဟုတ်ဘူး — ကိုယ်ပိုင် code နဲ့ ပြန်ဆောက်ထားတာ။
  */
 class MainActivity : AppCompatActivity() {
 
@@ -72,24 +79,24 @@ class MainActivity : AppCompatActivity() {
     )
 
     private data class PlanLine(val text: String, val photo: Int)
+    private data class Shot(val text: String, val imageUrl: String, val credit: String, val move: String)
 
-    private lateinit var etGeminiKey: EditText
-    private lateinit var etYtKey: EditText
     private lateinit var etNews: EditText
     private lateinit var etSource: EditText
+    private lateinit var etLink: EditText
     private lateinit var spTemplate: Spinner
     private lateinit var spVoice: Spinner
     private lateinit var spDuration: Spinner
     private lateinit var sbSpeed: SeekBar
     private lateinit var tvSpeed: TextView
     private lateinit var tvMediaInfo: TextView
-    private lateinit var etYtQuery: EditText
-    private lateinit var ytResults: LinearLayout
     private lateinit var etScript: EditText
+    private lateinit var etPlanJson: EditText
     private lateinit var tvPlanInfo: TextView
     private lateinit var tvStatus: TextView
     private lateinit var progressBar: ProgressBar
-    private lateinit var btnScript: Button
+    private lateinit var btnShareGemini: Button
+    private lateinit var btnApplyPlan: Button
     private lateinit var btnRender: Button
     private lateinit var btnStop: Button
     private lateinit var btnSave: Button
@@ -98,14 +105,18 @@ class MainActivity : AppCompatActivity() {
 
     private var photoUris: List<Uri> = emptyList()
     private var videoUri: Uri? = null
+    private var musicUri: Uri? = null
     private var planTitle = ""
     private var planTicker = ""
     private var planLines: List<PlanLine> = emptyList()
+    private var planShots: List<Shot> = emptyList()
+    private var planShotFiles: List<File> = emptyList()
+    private var planShotMoves: List<String> = emptyList()
+    private var planMusicMood = ""
     private var lastOutput: File? = null
     private var job: Job? = null
     private var busy = false
 
-    private val prefs by lazy { getSharedPreferences("dsnews", Context.MODE_PRIVATE) }
     private val http = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS)
         .readTimeout(60, TimeUnit.SECONDS)
@@ -115,22 +126,34 @@ class MainActivity : AppCompatActivity() {
         if (uris.isNotEmpty()) {
             photoUris = uris.take(3)
             videoUri = null
-            tvMediaInfo.text = "ပုံ ${photoUris.size} ပုံ ရွေးထားတယ် (video မပါဘူး)"
+            tvMediaInfo.text = "ပုံ ${photoUris.size} ပုံ ရွေးထားတယ် (video မပါဘူး)" + musicText()
         }
     }
     private val pickVideo = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             videoUri = uri
             photoUris = emptyList()
-            tvMediaInfo.text = "Video file ရွေးထားတယ် (ပုံ မပါဘူး)"
+            tvMediaInfo.text = "Video file ရွေးထားတယ် (ပုံ မပါဘူး)" + musicText()
         }
     }
+    private val pickMusic = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) {
+            musicUri = uri
+            tvMediaInfo.text = mediaBaseText() + musicText()
+        }
+    }
+
+    private fun mediaBaseText(): String = when {
+        videoUri != null -> "Video file ရွေးထားတယ် (ပုံ မပါဘူး)"
+        photoUris.isNotEmpty() -> "ပုံ ${photoUris.size} ပုံ ရွေးထားတယ် (video မပါဘူး)"
+        else -> "မရွေးရသေးဘူး — အရောင် နောက်ခံနဲ့ လုပ်မယ်"
+    }
+
+    private fun musicText(): String = if (musicUri != null) " • music ပါပြီ" else ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
-        etGeminiKey.setText(prefs.getString("gemini_key", ""))
-        etYtKey.setText(prefs.getString("yt_key", ""))
         updateSpeedLabel()
     }
 
@@ -217,22 +240,12 @@ class MainActivity : AppCompatActivity() {
             gravity = Gravity.CENTER
         })
         root.addView(TextView(this).apply {
-            text = "သတင်း → မြန်မာ script → အသံ + 9:16 video"
+            text = "သတင်း → Gemini (အပြင်) → JSON plan → အသံ + 9:16 video"
             setTextColor(color(colMuted))
             textSize = 13f
             gravity = Gravity.CENTER
         })
-
-        // Key တွေ
-        root.addView(title("🔑 Key တွေ (တစ်ခါပဲ ထည့်ရမယ်)"))
-        val keyCard = card()
-        etGeminiKey = input("Gemini Key — aistudio.google.com က ယူပါ", hidden = true)
-        keyCard.addView(TextView(this).apply { text = "Gemini Key *"; setTextColor(color(colText)) })
-        keyCard.addView(etGeminiKey)
-        etYtKey = input("YouTube API Key (မရှိရင် ဗလာ ထားလို့ရတယ်)", hidden = true)
-        keyCard.addView(TextView(this).apply { text = "YouTube API Key (ရှာချင်မှ လိုတယ်)"; setTextColor(color(colText)) })
-        keyCard.addView(etYtKey)
-        root.addView(keyCard)
+        root.addView(hint("Key ထည့်စရာ မလိုဘူး — Gemini က အပြင် Gemini app က Google account နဲ့ လုပ်တယ်။"))
 
         // သတင်း input
         root.addView(title("📰 သတင်း ထည့်ပါ"))
@@ -241,8 +254,9 @@ class MainActivity : AppCompatActivity() {
         newsCard.addView(etNews)
         etSource = input("ရင်းမြစ် နာမည် — ဥပမာ Sky Sports")
         newsCard.addView(etSource)
+        etLink = input("သတင်း Link (ရှိရင် — မရှိလဲ ရတယ်)")
+        newsCard.addView(etLink)
         root.addView(newsCard)
-        root.addView(hint("Link ပဲ ထည့်ရင် စာသား ဆွဲမရနိုင်ဘူး — စာသား ကူးထည့်တာက အသေချာဆုံးပဲ။"))
 
         // ရွေးချယ်မှုတွေ
         root.addView(title("⚙️ ရွေးချယ်မှု"))
@@ -271,8 +285,8 @@ class MainActivity : AppCompatActivity() {
         optCard.addView(sbSpeed)
         root.addView(optCard)
 
-        // ပုံ / video
-        root.addView(title("🖼️ ပုံ / Video (မထည့်လဲ ရတယ်)"))
+        // ပုံ / video / music
+        root.addView(title("🖼️ ပုံ / Video / Music (မထည့်လဲ ရတယ်)"))
         val mediaCard = card()
         tvMediaInfo = TextView(this).apply { text = "မရွေးရသေးဘူး — အရောင် နောက်ခံနဲ့ လုပ်မယ်"; setTextColor(color(colMuted)) }
         mediaCard.addView(tvMediaInfo)
@@ -282,29 +296,34 @@ class MainActivity : AppCompatActivity() {
         val btnVideo = makeButton("🎬 ဖုန်းထဲက video ရွေးမယ်", colCyan)
         btnVideo.setOnClickListener { pickVideo.launch("video/*") }
         mediaCard.addView(btnVideo)
+        val btnMusic = makeButton("🎵 နောက်ခံ music (MP3) ရွေးမယ်", colCyan)
+        btnMusic.setOnClickListener { pickMusic.launch("audio/*") }
+        mediaCard.addView(btnMusic)
         root.addView(mediaCard)
+        root.addView(hint("Music မထည့်ရင် အသံသက်သက်ပဲ ထွက်မယ်။ ထည့်ရင် အသံအောက် တိုးတိုးလေး ရောပေးမယ်။"))
 
-        // YouTube ရှာတာ
-        root.addView(title("🔍 YouTube မှာ ရှာမယ် (စာရင်းပဲ ပြတယ်)"))
-        val ytCard = card()
-        etYtQuery = input("ဥပမာ — Man Utd 4-4 Aston Villa")
-        ytCard.addView(etYtQuery)
-        val btnYt = makeButton("YouTube ရှာမယ်", colMagenta)
-        btnYt.setOnClickListener { searchYouTube() }
-        ytCard.addView(btnYt)
-        ytResults = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        ytCard.addView(ytResults)
-        root.addView(ytCard)
-        root.addView(hint("App က download မလုပ်ဘူး — ရှာတွေ့တဲ့ video နဲ့ ကိုက်တဲ့ file ကို ဖုန်းထဲက ရွေးထည့်ပါ။"))
+        // Gemini အပြင်ထုတ်မယ်
+        root.addView(title("🤖 Gemini အပြင်ထုတ်မယ် (Zippy လို)"))
+        val gemCard = card()
+        btnShareGemini = makeButton("📤 Gemini ကို ပို့မယ် (prompt + video Share)", colMagenta)
+        btnShareGemini.setOnClickListener { shareToGemini() }
+        gemCard.addView(btnShareGemini)
+        gemCard.addView(hint("Prompt ကို auto-copy လုပ်ပေးမယ်။ Gemini app မှာ Paste → JSON plan ပြန်ပေးမယ်။ Video ရွေးထားရင် video file ကိုပါ တွဲပို့မယ်။"))
+        root.addView(gemCard)
+
+        // Plan JSON ကူးထည့်မယ်
+        root.addView(title("📋 Plan JSON ကူးထည့်မယ်"))
+        etPlanJson = input("Gemini က ပြန်ပေးတဲ့ JSON ကို ဒီမှာ ကူးထည့်ပါ", lines = 6)
+        root.addView(etPlanJson)
+        btnApplyPlan = makeButton("📋 Plan ဖတ်မယ်", colMagenta)
+        btnApplyPlan.setOnClickListener { applyPlan() }
+        root.addView(btnApplyPlan)
+        tvPlanInfo = TextView(this).apply { setTextColor(color(colMuted)); textSize = 13f }
+        root.addView(tvPlanInfo)
 
         // Script
         root.addView(title("📝 Script"))
-        btnScript = makeButton("✨ Script ထုတ်မယ် (Gemini)", colMagenta)
-        btnScript.setOnClickListener { makeScript() }
-        root.addView(btnScript)
-        tvPlanInfo = TextView(this).apply { setTextColor(color(colMuted)); textSize = 13f }
-        root.addView(tvPlanInfo)
-        etScript = input("Script ဒီမှာ ပေါ်လာမယ် — ဖတ်ပြီး ပြင်လို့ရတယ် (တစ်ကြောင်းချင်း = အသံ တစ်ပိုင်း)", lines = 8)
+        etScript = input("Plan ဖတ်ပြီးရင် script ဒီမှာ ပေါ်လာမယ် — ဖတ်ပြီး ပြင်လို့ရတယ် (တစ်ကြောင်းချင်း = အသံ တစ်ပိုင်း)", lines = 8)
         root.addView(etScript)
 
         // Render
@@ -324,11 +343,11 @@ class MainActivity : AppCompatActivity() {
         root.addView(tvStatus)
 
         videoView = VideoView(this).apply {
+            visibility = View.GONE
             layoutParams = LinearLayout.LayoutParams(dp(270), dp(480)).apply {
                 topMargin = dp(10)
                 gravity = Gravity.CENTER
             }
-            visibility = View.GONE
         }
         val mediaController = MediaController(this).apply { setAnchorView(videoView) }
         videoView.setMediaController(mediaController)
@@ -361,7 +380,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun setBusy(b: Boolean, status: String = "") {
         busy = b
-        btnScript.isEnabled = !b
+        btnShareGemini.isEnabled = !b
+        btnApplyPlan.isEnabled = !b
         btnRender.isEnabled = !b
         progressBar.visibility = if (b) View.VISIBLE else View.GONE
         if (status.isNotEmpty()) tvStatus.text = status
@@ -377,129 +397,201 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun saveKeys() {
-        prefs.edit()
-            .putString("gemini_key", etGeminiKey.text.toString().trim())
-            .putString("yt_key", etYtKey.text.toString().trim())
-            .apply()
+    // ---------- Gemini အပြင်ထုတ်မယ် ----------
+
+    /** Gemini app ကို ပို့မယ့် prompt — ကိုယ်ပိုင် စာသား (Zippy ရဲ့ prompt အတိအကျ မဟုတ်)။ */
+    private fun buildExternalPrompt(news: String, source: String, link: String, dur: Int): String {
+        val lineCount = when (dur) {
+            30 -> "၂-၃ shots"
+            90 -> "၆-၈ shots"
+            else -> "၄-၅ shots"
+        }
+        val template = listOf("Classic", "Breaking", "Sport")[spTemplate.selectedItemPosition]
+        val voiceName = if (spVoice.selectedItemPosition == 0) "male" else "female"
+        return """
+You are a Burmese news video planner. Read the source news text below and return ONLY a JSON plan for a vertical news video. No explanation, no markdown fence — JSON only.
+
+Rules:
+- Use ONLY facts from the source text. Never invent new facts, names, scores or quotes (no fake news).
+- Write all narration in spoken Burmese. Start with a 1-line hook, then the main points, then a 1-line ending.
+- Total $lineCount (video about $dur seconds). Each shot has 1-2 short spoken sentences.
+- Template: $template. Voice: $voiceName. Speed is 1.2x.
+- Each shot: "text" (narration), "move" (one of static / zoom / pan), "image" (a Wikimedia Commons image URL that matches the shot, or empty), "credit" (the image credit, or empty).
+- "music_mood": one word for background music mood (e.g. serious, upbeat, tense, calm).
+- "ticker": a short ticker line. "sources": list the source name(s).
+
+JSON shape:
+{"title": "short title", "ticker": "ticker line", "template": "$template", "voice": "$voiceName", "music_mood": "serious", "shots": [{"text": "narration", "move": "static", "image": "https://upload.wikimedia.org/...", "credit": "Photo: ..."}, {"text": "next narration", "move": "zoom", "image": "", "credit": ""}], "sources": ["$source"]}
+
+Source news text:
+$news
+${if (link.isNotBlank()) "Source link: $link" else ""}
+""".trimIndent()
     }
 
-    // ---------- YouTube ရှာတာ ----------
-
-    private fun searchYouTube() {
-        val key = etYtKey.text.toString().trim()
-        val q = etYtQuery.text.toString().trim()
-        if (key.isEmpty()) {
-            showError("YouTube Key လိုတယ်", "YouTube Data API v3 key ထည့်မှ ရှာလို့ရမယ်။\nconsole.cloud.google.com → Project → YouTube Data API v3 Enable → Credentials → API key")
-            return
-        }
-        if (q.isEmpty()) {
-            Toast.makeText(this, "ရှာချင်တာ ရိုက်ထည့်ပါ", Toast.LENGTH_SHORT).show()
+    private fun shareToGemini() {
+        val news = etNews.text.toString().trim()
+        if (news.length < 20) {
+            showError("သတင်း နည်းနေတယ်", "မူရင်း သတင်းစာသား ကူးထည့်ပါ — ခေါင်းစဉ်ပဲ ပေးလို့ မရဘူး")
             return
         }
         if (busy) return
-        setBusy(true, "YouTube ရှာနေတယ်...")
+        setBusy(true, "Gemini ပို့ဖို့ ပြင်နေတယ်...")
         job = lifecycleScope.launch {
             try {
-                val url = "https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&maxResults=8" +
-                    "&q=${Uri.encode(q)}&key=$key"
-                val resp = withContext(Dispatchers.IO) {
-                    http.newCall(Request.Builder().url(url).build()).execute().use { it.body?.string() ?: "" }
-                }
-                val items = JSONObject(resp).optJSONArray("items")
-                ytResults.removeAllViews()
-                if (items == null || items.length() == 0) {
-                    tvStatus.text = "ရှာမတွေ့ဘူး — စကားလုံး ပြောင်းပြီး ပြန်ရှာပါ"
-                } else {
-                    for (i in 0 until items.length()) {
-                        val it = items.getJSONObject(i)
-                        val sn = it.getJSONObject("snippet")
-                        val title = sn.optString("title")
-                        val channel = sn.optString("channelTitle")
-                        val vid = it.optJSONObject("id")?.optString("videoId") ?: ""
-                        val b = Button(this@MainActivity).apply {
-                            text = "▶ $title\n$channel"
-                            textSize = 13f
-                            setTextColor(color(colText))
-                            setBackgroundColor(Color.parseColor("#16203A"))
-                            setOnClickListener {
-                                etSource.setText(channel)
-                                tvStatus.text = "ရွေးထားတယ်: $title\nဒီ video နဲ့ ကိုက်တဲ့ file ကို ဖုန်းထဲက ရွေးပါ — App က download မလုပ်ဘူး။"
-                                Toast.makeText(this@MainActivity, "ရင်းမြစ်: $channel", Toast.LENGTH_SHORT).show()
-                            }
+                val prompt = buildExternalPrompt(
+                    news,
+                    etSource.text.toString().trim(),
+                    etLink.text.toString().trim(),
+                    durationSec()
+                )
+                // Prompt ကို clipboard မှာ auto-copy လုပ်ပေးတယ် (Zippy လို)
+                val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                cm.setPrimaryClip(ClipData.newPlainText("DS News prompt", prompt))
+
+                // Video / ပုံ ရွေးထားရင် file အဖြစ် ကူးပြီး တွဲပို့မယ်
+                val shareUris = withContext(Dispatchers.IO) {
+                    val dir = File(cacheDir, "share_${System.currentTimeMillis()}").apply { mkdirs() }
+                    val list = mutableListOf<Uri>()
+                    videoUri?.let { list.add(FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", copyUriToFile(it, File(dir, "video.mp4")))) }
+                    if (videoUri == null) {
+                        photoUris.forEachIndexed { i, uri ->
+                            list.add(FileProvider.getUriForFile(this@MainActivity, "${packageName}.fileprovider", copyUriToFile(uri, File(dir, "photo_$i.jpg"))))
                         }
-                        ytResults.addView(b)
                     }
-                    tvStatus.text = "တွေ့ပြီ ${items.length()} ခု — တစ်ခုနှိပ်ရင် ရင်းမြစ် ဖြည့်ပေးမယ်"
+                    list
                 }
+                val intent = if (shareUris.isEmpty()) {
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_TEXT, prompt)
+                    }
+                } else {
+                    Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                        type = "*/*"
+                        putExtra(Intent.EXTRA_TEXT, prompt)
+                        putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(shareUris))
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                }
+                startActivity(Intent.createChooser(intent, "Gemini ကို ပို့မယ် — Gemini app ရွေးပါ"))
+                tvStatus.text = "Prompt ကူးပြီးပြီ + Share ဖွင့်ပြီးပြီ — Gemini app မှာ Paste လုပ်၊ JSON plan ရရင် အောက်မှာ ကူးထည့်ပါ"
+                Toast.makeText(this@MainActivity, "Prompt ကူးပြီးပြီ — Gemini app ရွေးပါ", Toast.LENGTH_LONG).show()
             } catch (e: Exception) {
-                showError("YouTube ရှာမရပါ", "${e.message}\n\nKey မှန်လား၊ internet ရှိလား စစ်ပါ။")
+                showError("Gemini ပို့မရပါ", e.message ?: "အကြောင်းမသိ error")
             } finally {
                 setBusy(false)
             }
         }
     }
 
-    // ---------- Script (Gemini) ----------
+    // ---------- Plan JSON ဖတ်မယ် ----------
 
-    private fun buildPrompt(news: String, dur: Int): String {
-        val lineCount = when (dur) {
-            30 -> "၂-၃ ကြောင်း"
-            90 -> "၆-၈ ကြောင်း"
-            else -> "၄-၅ ကြောင်း"
+    /** Gemini အဖြေထဲက ```json ... ``` fence ကို ဖြုတ်ပြီး JSON စာသား သက်သက် ထုတ်ပေးတယ်။ */
+    private fun extractJson(raw: String): String {
+        var s = raw.trim()
+        if (s.startsWith("```")) {
+            s = s.removePrefix("```").trim()
+            if (s.startsWith("json", ignoreCase = true)) s = s.substring(4).trim()
+            if (s.endsWith("```")) s = s.removeSuffix("```").trim()
         }
-        return """
-အောက်က မူရင်း သတင်းစာသားကို ဖတ်ပြီး မြန်မာ သတင်း video အတွက် script + plan ကို JSON တစ်ခုတည်း ပြန်ပေးပါ။
-စည်းကမ်း:
-- မူရင်းစာမှာ ပါတဲ့ အချက်ပဲ သုံးပါ။ မပါတဲ့ အချက် အသစ် လုံးဝ မထည့်ပါနဲ့ (fake news မဖြစ်အောင်)။
-- မြန်မာလို ရေးပါ။ Hook ၁ ကြောင်းနဲ့ စပါ၊ ပြီးရင် အဓိက အချက် ၃-၄ ချက်၊ အဆုံး ၁ ကြောင်း။
-- စုစုပေါင်း $lineCount ဖြစ်ရမယ် (ဗီဒီယို $dur စက္ကန့်စာ)။ တစ်ကြောင်းချင်း စာကြောင်း ၁-၂ ကြောင်းပဲ ဖြစ်ရမယ်။
-- JSON သက်သက် ပြန်ပေးပါ — markdown fence မပါစေနဲ့။
-- ပုံစံ:
-{"title": "ခေါင်းစဉ် တို", "ticker": "အောက်မှာ ပြေးမယ့် စာတို", "lines": [{"text": "အသံဖတ်မယ့် စာသား"}, {"text": "နောက် စာသား"}]}
-
-မူရင်း သတင်းစာသား:
-$news
-""".trimIndent()
+        val start = s.indexOf('{')
+        val end = s.lastIndexOf('}')
+        if (start >= 0 && end > start) s = s.substring(start, end + 1)
+        return s
     }
 
-    private fun makeScript() {
-        val key = etGeminiKey.text.toString().trim()
-        val news = etNews.text.toString().trim()
-        if (key.isEmpty()) {
-            showError("Gemini Key လိုတယ်", "aistudio.google.com → Get API key → Create API key → key ကို ဒီမှာ ထည့်ပါ")
-            return
-        }
-        if (news.length < 20) {
-            showError("သတင်း နည်းနေတယ်", "မူရင်း သတင်းစာသား ကူးထည့်ပါ — ခေါင်းစဉ်ပဲ ပေးလို့ မရဘူး")
+    private fun applyPlan() {
+        val raw = etPlanJson.text.toString().trim()
+        if (raw.length < 10) {
+            showError("JSON မရှိသေးဘူး", "အရင် \"Gemini ကို ပို့မယ်\" နှိပ်ပြီး Gemini က ပြန်ပေးတဲ့ JSON ကို ဒီမှာ ကူးထည့်ပါ")
             return
         }
         if (busy) return
-        saveKeys()
-        setBusy(true, "Gemini script ရေးနေတယ်...")
+        setBusy(true, "Plan ဖတ်နေတယ်...")
         job = lifecycleScope.launch {
             try {
-                val raw = GeminiClient.generateText(key, buildPrompt(news, durationSec())) { log ->
-                    runOnUiThread { tvStatus.text = log } // generateText က IO thread မှာ ခေါ်တယ်
-                }
-                val plan = JSONObject(GeminiClient.extractJson(raw))
+                val plan = JSONObject(extractJson(raw))
                 planTitle = plan.optString("title")
                 planTicker = plan.optString("ticker")
-                val arr = plan.optJSONArray("lines") ?: throw IOException("Gemini အဖြေမှာ lines မပါဘူး")
-                val lines = mutableListOf<PlanLine>()
-                for (i in 0 until arr.length()) {
-                    val o = arr.getJSONObject(i)
-                    val t = o.optString("text").trim()
-                    if (t.isNotEmpty()) lines.add(PlanLine(t, o.optInt("photo", -1)))
+                planMusicMood = plan.optString("music_mood")
+
+                // Template / အသံ ကို JSON အတိုင်း ရွေးပေးတယ်
+                val tpl = plan.optString("template")
+                listOf("Classic", "Breaking", "Sport").indexOfFirst { it.equals(tpl, ignoreCase = true) }
+                    .takeIf { it >= 0 }?.let { spTemplate.setSelection(it) }
+                val v = plan.optString("voice")
+                if (v.contains("female", ignoreCase = true)) spVoice.setSelection(1)
+                else if (v.contains("male", ignoreCase = true)) spVoice.setSelection(0)
+
+                // Shots ကို အရင် ယူတယ်၊ မပါရင် lines အဟောင်းပုံစံကို သုံးတယ်
+                val shots = mutableListOf<Shot>()
+                val shotsArr = plan.optJSONArray("shots")
+                if (shotsArr != null) {
+                    for (i in 0 until shotsArr.length()) {
+                        val o = shotsArr.getJSONObject(i)
+                        val t = o.optString("text").trim()
+                        if (t.isNotEmpty()) shots.add(
+                            Shot(t, o.optString("image"), o.optString("credit"), o.optString("move").ifBlank { "static" })
+                        )
+                    }
+                } else {
+                    val arr = plan.optJSONArray("lines")
+                        ?: throw IOException("JSON မှာ shots / lines မပါဘူး")
+                    for (i in 0 until arr.length()) {
+                        val o = arr.getJSONObject(i)
+                        val t = o.optString("text").trim()
+                        if (t.isNotEmpty()) shots.add(Shot(t, "", "", "static"))
+                    }
                 }
-                if (lines.isEmpty()) throw IOException("Gemini script ဗလာ ဖြစ်နေပါတယ်")
-                planLines = lines
-                etScript.setText(lines.joinToString("\n") { it.text })
-                tvPlanInfo.text = "ခေါင်းစဉ်: $planTitle\nTicker: $planTicker\nအသံ ${lines.size} ပိုင်း — ပြင်ပြီးမှ \"Video လုပ်မယ်\" နှိပ်ပါ"
-                tvStatus.text = "Script ရပြီ — ဖတ်ပြီး ပြင်လို့ရတယ်"
+                if (shots.isEmpty()) throw IOException("Plan မှာ စာသား မပါဘူး")
+                planShots = shots
+                planLines = shots.mapIndexed { i, s -> PlanLine(s.text, i) }
+
+                // Web ပုံတွေ ဒေါင်းတယ် (ရရင် သုံးမယ်၊ မရရင် ကျော်မယ် — plan မပျက်စေနဲ့)
+                val shotDir = File(cacheDir, "plan_shots").apply { mkdirs() }
+                val files = mutableListOf<File>()
+                val moves = mutableListOf<String>()
+                val credits = mutableListOf<String>()
+                withContext(Dispatchers.IO) {
+                    shots.forEachIndexed { i, s ->
+                        moves.add(s.move)
+                        if (s.credit.isNotBlank()) credits.add(s.credit)
+                        if (s.imageUrl.startsWith("http")) {
+                            try {
+                                val req = Request.Builder().url(s.imageUrl).build()
+                                http.newCall(req).execute().use { r ->
+                                    if (r.isSuccessful) {
+                                        val f = File(shotDir, "shot_$i.jpg")
+                                        r.body?.byteStream()?.use { input -> FileOutputStream(f).use { out -> input.copyTo(out) } }
+                                        if (f.length() > 0) files.add(f) else files.add(File(""))
+                                    } else files.add(File(""))
+                                }
+                            } catch (_: Exception) {
+                                files.add(File(""))
+                            }
+                        } else files.add(File(""))
+                    }
+                }
+                // ဒေါင်းရတဲ့ ပုံပဲ ယူတယ် — အလွတ် slot တွေကို ဖယ်တယ် (moves လည်း အတူတူ ညှိတယ်)
+                val keptFiles = mutableListOf<File>()
+                val keptMoves = mutableListOf<String>()
+                files.forEachIndexed { i, f ->
+                    if (f.path.isNotEmpty() && f.exists() && f.length() > 0) {
+                        keptFiles.add(f)
+                        keptMoves.add(moves[i])
+                    }
+                }
+                planShotFiles = keptFiles
+                planShotMoves = keptMoves
+
+                etScript.setText(shots.joinToString("\n") { it.text })
+                val creditNote = if (credits.isNotEmpty()) "\nပုံ credit: ${credits.take(3).joinToString(" • ")}" else ""
+                tvPlanInfo.text = "ခေါင်းစဉ်: $planTitle\nTicker: $planTicker\nShots ${shots.size} ခု • Web ပုံ ${keptFiles.size} ပုံ ရပြီ • Music: ${planMusicMood.ifBlank { "—" }}$creditNote\nအသံ ${shots.size} ပိုင်း — ပြင်ပြီးမှ \"Video လုပ်မယ်\" နှိပ်ပါ"
+                tvStatus.text = "Plan ရပြီ — ဖတ်ပြီး ပြင်လို့ရတယ်"
             } catch (e: Exception) {
-                showError("Script ထုတ်မရပါ", e.message ?: "အကြောင်းမသိ error")
-                tvStatus.text = "Script မရသေးဘူး"
+                showError("Plan ဖတ်မရပါ", "${e.message}\n\nGemini က JSON သက်သက် ပြန်ပေးလား စစ်ပါ — စာသား အပို ပါရင် ဖြုတ်ပြီး ပြန်ကူးပါ။")
+                tvStatus.text = "Plan မရသေးဘူး"
             } finally {
                 setBusy(false)
             }
@@ -509,18 +601,12 @@ $news
     // ---------- Render (TTS + FFmpeg) ----------
 
     private fun renderVideo() {
-        val key = etGeminiKey.text.toString().trim()
-        if (key.isEmpty()) {
-            showError("Gemini Key လိုတယ်", "Key ထည့်မှ Script ထုတ်လို့ရမယ်")
-            return
-        }
         val edited = etScript.text.toString().lines().map { it.trim() }.filter { it.isNotEmpty() }
         if (edited.isEmpty()) {
-            showError("Script မရှိသေးဘူး", "အရင် \"Script ထုတ်မယ်\" နှိပ်ပါ")
+            showError("Script မရှိသေးဘူး", "အရင် \"Gemini ကို ပို့မယ်\" → JSON ကူး → \"Plan ဖတ်မယ်\" လုပ်ပါ")
             return
         }
         if (busy) return
-        saveKeys()
         setBusy(true, "အသံ ဖတ်နေတယ်...")
         job = lifecycleScope.launch {
             try {
@@ -541,14 +627,23 @@ $news
                 }
                 val total = (renderLines.lastOrNull()?.endSec ?: 0.0).coerceAtLeast(1.0)
 
-                // ပုံ / video ကို cache file အဖြစ် ကူးတယ် (FFmpeg က local file နဲ့ လုပ်မှ စိတ်ချရတယ်)
+                // ပုံ / video / music ကို cache file အဖြစ် ကူးတယ် (FFmpeg က local file နဲ့ လုပ်မှ စိတ်ချရတယ်)
                 // + FFmpeg render က blocking ဖြစ်လို့ IO thread မှာ လုပ်တယ် (UI freeze မဖြစ်အောင်)
-                val (photoFiles, videoFile) = withContext(Dispatchers.IO) {
-                    val pf = photoUris.mapIndexed { i, uri ->
-                        copyUriToFile(uri, File(workDir, "photo_$i.jpg"))
+                val (photoFiles, videoFile, musicFile, moves) = withContext(Dispatchers.IO) {
+                    // Web ပုံ (plan) အရင်၊ ပြီးမှ user ပုံ
+                    val pf = mutableListOf<File>()
+                    val mv = mutableListOf<String>()
+                    planShotFiles.forEachIndexed { i, f ->
+                        pf.add(copyFileTo(f, File(workDir, "shot_$i.jpg")))
+                        mv.add(planShotMoves.getOrElse(i) { "static" })
+                    }
+                    photoUris.forEachIndexed { i, uri ->
+                        pf.add(copyUriToFile(uri, File(workDir, "photo_$i.jpg")))
+                        mv.add("static")
                     }
                     val vf = videoUri?.let { copyUriToFile(it, File(workDir, "user_video.mp4")) }
-                    Pair(pf, vf)
+                    val mf = musicUri?.let { copyUriToFile(it, File(workDir, "music.mp3")) }
+                    Quad(pf, vf, mf, mv)
                 }
 
                 tvStatus.text = "Video ပေါင်းနေတယ်..."
@@ -565,6 +660,8 @@ $news
                         title = planTitle.ifBlank { "သတင်း" },
                         ticker = planTicker.ifBlank { planTitle },
                         source = etSource.text.toString().trim(),
+                        shotMoves = moves,
+                        musicFile = musicFile,
                         onProgress = { msg -> runOnUiThread { tvStatus.text = msg } }
                     )
                 }
@@ -588,6 +685,8 @@ $news
         }
     }
 
+    private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+
     private fun audioDurationSec(f: File): Double {
         val r = MediaMetadataRetriever()
         return try {
@@ -604,6 +703,11 @@ $news
         contentResolver.openInputStream(uri)?.use { input ->
             FileOutputStream(out).use { output -> input.copyTo(output) }
         } ?: throw IOException("File ဖတ်မရပါ: $uri")
+        return out
+    }
+
+    private fun copyFileTo(src: File, out: File): File {
+        src.inputStream().use { input -> FileOutputStream(out).use { output -> input.copyTo(output) } }
         return out
     }
 

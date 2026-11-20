@@ -19,6 +19,11 @@ import java.util.Locale
  * အရင် ဆွဲပြီး FFmpeg overlay နဲ့ ကပ်တယ်။ အဲဒီတော့ မြန်မာ font ပြဿနာ မရှိဘူး
  * (Recap လည်း စာတန်းထိုးကို ဒီနည်းနဲ့ပဲ လုပ်တယ်)။
  *
+ * V2 အသစ်:
+ *  - shotMoves — ပုံတစ်ပုံချင်း move (static / zoom / pan) ကို zoompan နဲ့ လုပ်တယ်။
+ *    static ဆိုရင် အရင်အတိုင်း scale/crop slideshow ပဲ။
+ *  - musicFile — နောက်ခံ music (MP3) ပါရင် အသံအောက် 15% အသံနဲ့ ရောပေးတယ် (amix)။
+ *
  * Pass တွေ (တစ်ခုချင်း ရိုးရိုးလုပ်တယ် — တစ်ခုခု ပျက်ရင် ဘယ် pass လဲ သိရတယ်):
  *  1. base video — ပုံ slideshow / user video / အရောင် နောက်ခံ (720x1280, 30fps, အသံမပါ)
  *  2. အသံ + ခေါင်းစဉ် (0–3.5s) + watermark + ticker bar ထည့်တယ်
@@ -58,6 +63,8 @@ object NewsRenderer {
         title: String,
         ticker: String,
         source: String,
+        shotMoves: List<String> = emptyList(),
+        musicFile: File? = null,
         onProgress: (String) -> Unit
     ): File {
         workDir.mkdirs()
@@ -76,6 +83,22 @@ object NewsRenderer {
             "-c:a", "aac", "-b:a", "128k", audioFile.absolutePath
         ), "အသံ ဆက်မရပါ")
 
+        // --- နောက်ခံ music ပါရင် အသံအောက် တိုးတိုးလေး ရောတယ် ---
+        var finalAudio = audioFile
+        if (musicFile != null && musicFile.exists() && musicFile.length() > 0) {
+            onProgress("Music ရောနေတယ်...")
+            val mixed = File(workDir, "audio_mixed.m4a")
+            runFfmpeg(arrayOf(
+                "-y", "-hide_banner", "-loglevel", "error",
+                "-i", audioFile.absolutePath,
+                "-stream_loop", "-1", "-i", musicFile.absolutePath,
+                "-filter_complex", "[1:a]volume=0.15[m];[0:a][m]amix=inputs=2:duration=first:dropout_transition=0[aout]",
+                "-map", "[aout]",
+                "-c:a", "aac", "-b:a", "128k", "-t", fmt(total), mixed.absolutePath
+            ), "Music ရောမရပါ")
+            finalAudio = mixed
+        }
+
         // --- Pass 1: base video ---
         onProgress("Video အခြေခံ တည်ဆောက်နေတယ်...")
         val base = File(workDir, "base.mp4")
@@ -90,12 +113,26 @@ object NewsRenderer {
             ), "Video အခြေခံ လုပ်မရပါ")
             photos.isNotEmpty() -> {
                 val per = total / photos.size
+                val frames = (per * 30).toInt().coerceAtLeast(15)
                 val args = mutableListOf<String>()
                 args += listOf("-y", "-hide_banner", "-loglevel", "error")
-                photos.forEach { args += listOf("-loop", "1", "-t", fmt(per), "-i", it.absolutePath) }
+                photos.forEachIndexed { i, photo ->
+                    val move = shotMoves.getOrElse(i) { "static" }.lowercase(Locale.US)
+                    if (move == "zoom" || move == "pan" || move == "left" || move == "right") {
+                        args += listOf("-i", photo.absolutePath)
+                    } else {
+                        args += listOf("-loop", "1", "-t", fmt(per), "-i", photo.absolutePath)
+                    }
+                }
                 val fc = StringBuilder()
                 photos.indices.forEach { i ->
-                    fc.append("[$i:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30,trim=0:${fmt(per)},setpts=PTS-STARTPTS[v$i];")
+                    val move = shotMoves.getOrElse(i) { "static" }.lowercase(Locale.US)
+                    when (move) {
+                        "zoom" -> fc.append("[$i:v]zoompan=z='min(zoom+0.0012,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=$frames:s=720x1280:fps=30,setsar=1[v$i];")
+                        "pan", "left" -> fc.append("[$i:v]zoompan=z='1.12':x='(iw-iw/zoom)*on/$frames':y='ih/2-(ih/zoom/2)':d=$frames:s=720x1280:fps=30,setsar=1[v$i];")
+                        "right" -> fc.append("[$i:v]zoompan=z='1.12':x='(iw-iw/zoom)*(1-on/$frames)':y='ih/2-(ih/zoom/2)':d=$frames:s=720x1280:fps=30,setsar=1[v$i];")
+                        else -> fc.append("[$i:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1,fps=30,trim=0:${fmt(per)},setpts=PTS-STARTPTS[v$i];")
+                    }
                 }
                 photos.indices.forEach { fc.append("[v$it]") }
                 fc.append("concat=n=${photos.size}:v=1:a=0[vout]")
@@ -123,7 +160,7 @@ object NewsRenderer {
         val withAudio = File(workDir, "with_audio.mp4")
         runFfmpeg(arrayOf(
             "-y", "-hide_banner", "-loglevel", "error",
-            "-i", base.absolutePath, "-i", audioFile.absolutePath,
+            "-i", base.absolutePath, "-i", finalAudio.absolutePath,
             "-i", titlePng.absolutePath, "-i", wmPng.absolutePath, "-i", tickerPng.absolutePath,
             "-filter_complex",
             "[0:v][2:v]overlay=(W-w)/2:110:enable='between(t,0,3.5)'[v1];" +
